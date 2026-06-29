@@ -1,0 +1,153 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #090806;
+  font-family: Arial, Helvetica, sans-serif;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+body {
+  color: white;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+.gameShell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 20%, #2b2118 0%, #090806 62%, #030302 100%);
+}
+
+.gameCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.hud {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  left: 14px;
+  right: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+  z-index: 4;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-shadow: 0 2px 0 #000, 0 0 10px rgba(100, 255, 90, 0.7);
+}
+
+.hudBox {
+  background: rgba(10, 8, 7, 0.55);
+  border: 1px solid rgba(148, 255, 65, 0.45);
+  box-shadow: inset 0 0 18px rgba(95, 255, 63, 0.07), 0 8px 24px rgba(0,0,0,0.35);
+  padding: 9px 11px;
+  border-radius: 8px;
+  min-width: 94px;
+}
+
+.hudLabel {
+  display: block;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+.hudValue {
+  font-size: 18px;
+  color: #b3ff46;
+}
+
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(22px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: min(92vw, 560px);
+  border: 1px solid rgba(255, 244, 184, 0.35);
+  border-radius: 14px;
+  background: rgba(8, 7, 6, 0.72);
+  color: #ffe9a4;
+  padding: 11px 14px;
+  line-height: 1.25;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  z-index: 5;
+  pointer-events: none;
+  text-shadow: 0 2px 0 #000;
+}
+
+.touchPad {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  touch-action: none;
+}
+
+.scanlines {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background:
+    linear-gradient(rgba(255,255,255,0.035) 50%, rgba(0,0,0,0.05) 50%),
+    radial-gradient(circle at 50% 30%, transparent 0%, rgba(0,0,0,0.28) 100%);
+  background-size: 100% 4px, 100% 100%;
+  mix-blend-mode: overlay;
+  opacity: 0.6;
+}
+
+.cornerNote {
+  position: absolute;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 4;
+  font-size: 10px;
+  color: rgba(255,255,255,0.55);
+  pointer-events: none;
+  letter-spacing: 0.06em;
+  text-shadow: 0 1px 2px #000;
+}
+
+@media (max-width: 640px) {
+  .hud {
+    top: max(10px, env(safe-area-inset-top));
+    left: 10px;
+    right: 10px;
+  }
+  .hudBox {
+    min-width: 78px;
+    padding: 7px 8px;
+  }
+  .hudValue {
+    font-size: 15px;
+  }
+  .toast {
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    font-size: 11px;
+  }
+  .cornerNote {
+    display: none;
+  }
+}
