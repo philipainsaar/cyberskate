@@ -7,6 +7,15 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
+// Polish-pass tuning values based on the actual uploaded GLBs.
+// skate-park.glb is authored as a tiny diorama, so it must be enlarged for gameplay.
+const PARK_SCALE = 28;
+const SKATER_HEIGHT = 2.95;
+const SKATER_FACING_OFFSET = Math.PI;
+const SPAWN_Z_BIAS = -0.33;
+const WALKABLE_NORMAL_Y = 0.42;
+const PLAYER_RADIUS = 0.58;
+
 function makeNoise(seed = 1) {
   let s = seed >>> 0;
   return () => {
@@ -246,6 +255,18 @@ function normalizeObjectToGround(object, targetHeight = 2.8) {
   return object;
 }
 
+function fitParkToWorld(parkRoot) {
+  parkRoot.scale.setScalar(PARK_SCALE);
+  parkRoot.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(parkRoot);
+  const center = box.getCenter(new THREE.Vector3());
+  parkRoot.position.x -= center.x;
+  parkRoot.position.z -= center.z;
+  parkRoot.position.y -= box.min.y;
+  parkRoot.updateMatrixWorld(true);
+  return new THREE.Box3().setFromObject(parkRoot);
+}
+
 function loadGLB(loader, url) {
   return new Promise((resolve, reject) => {
     loader.load(url, resolve, undefined, reject);
@@ -273,6 +294,8 @@ export default function CyberSkateGame() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
     renderer.domElement.className = 'gameCanvas';
     mount.appendChild(renderer.domElement);
 
@@ -315,7 +338,7 @@ export default function CyberSkateGame() {
     const amber1 = new THREE.PointLight(0xffb035, 1.6, 40, 2);
     amber1.position.set(-14, 9, 19);
     scene.add(amber1);
-    const amber2 = new THREE.PointLight(0xffcc6c, 1.05, 30, 2);
+    const amber2 = new THREE.PointLight(0xffcc6c, 1.2, 34, 2);
     amber2.position.set(18, 7, -18);
     scene.add(amber2);
 
@@ -330,6 +353,9 @@ export default function CyberSkateGame() {
     const downRay = new THREE.Raycaster();
     const downOrigin = new THREE.Vector3();
     const downDir = new THREE.Vector3(0, -1, 0);
+    const wallRay = new THREE.Raycaster();
+    const wallOrigin = new THREE.Vector3();
+    const wallDir = new THREE.Vector3();
 
     const playerRoot = new THREE.Group();
     const playerLean = new THREE.Group();
@@ -373,6 +399,7 @@ export default function CyberSkateGame() {
 
     const animationMixers = [];
     let currentVisual = null;
+    const animationControls = { mixer: null, action: null, clipName: '' };
 
     function mountPlayerVisual(object) {
       if (currentVisual) playerLean.remove(currentVisual);
@@ -395,31 +422,51 @@ export default function CyberSkateGame() {
       );
     }
 
+    function addFallbackGrindZones(bounds) {
+      const size = bounds.getSize(new THREE.Vector3());
+      const center = bounds.getCenter(new THREE.Vector3());
+      rails.push(
+        { name: 'center ledge helper', x: center.x, z: center.z, len: Math.max(6, size.x * 0.34), horizontal: true, h: 1.05 },
+        { name: 'side rail helper', x: center.x - size.x * 0.24, z: center.z + size.z * 0.12, len: Math.max(6, size.z * 0.32), horizontal: false, h: 1.0 }
+      );
+    }
+
     function registerParkCollision(parkRoot) {
       parkRoot.updateMatrixWorld(true);
       const bounds = new THREE.Box3().setFromObject(parkRoot);
+      const boundsSize = bounds.getSize(new THREE.Vector3());
       addBoundaryWalls(bounds);
 
+      const meshes = [];
       parkRoot.traverse((obj) => {
         if (!obj.isMesh) return;
         obj.castShadow = true;
         obj.receiveShadow = true;
-
-        const materialsToPatch = Array.isArray(obj.material) ? obj.material : [obj.material];
-        materialsToPatch.forEach((m) => {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        mats.forEach((m) => {
           if (!m) return;
-          m.side = THREE.FrontSide;
+          if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+          m.roughness = Math.min(1, m.roughness ?? 0.9);
           m.needsUpdate = true;
         });
-
         parkCollisionMeshes.push(obj);
         const box = new THREE.Box3().setFromObject(obj);
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
+        meshes.push({ obj, box, size, center });
+      });
+
+      const singleMergedParkMesh = meshes.length <= 2;
+      for (const item of meshes) {
+        const obj = item.obj;
+        const box = item.box;
+        const size = item.size;
+        const center = item.center;
         const lowerName = (obj.name || '').toLowerCase();
+        const isMainMergedMesh = singleMergedParkMesh || (size.x > boundsSize.x * 0.7 && size.z > boundsSize.z * 0.7);
 
         const isRailByName = lowerName.includes('rail') || lowerName.includes('grind');
-        const isThinRailShape = size.y < 0.55 && ((size.x > 2.5 && size.z < 0.9) || (size.z > 2.5 && size.x < 0.9));
+        const isThinRailShape = size.y < 0.8 && ((size.x > 3 && size.z < 1.1) || (size.z > 3 && size.x < 1.1));
         if (isRailByName || isThinRailShape) {
           rails.push({
             name: obj.name || 'rail',
@@ -429,19 +476,23 @@ export default function CyberSkateGame() {
             horizontal: size.x >= size.z,
             h: box.max.y
           });
-          return;
+          continue;
         }
 
+        // If the park was exported as one merged mesh, a bounding box collider would block the whole map.
+        // Use triangle raycasts for the merged mesh instead, and keep only boundaries + helper rails.
+        if (isMainMergedMesh) continue;
+
         const looksRideableSlope = (
-          box.min.y < 0.35 &&
+          box.min.y < 0.65 &&
           size.y > 0.3 &&
-          size.y < 6 &&
+          size.y < 7 &&
           (size.x > 2 || size.z > 2) &&
           (size.y / Math.max(size.x, size.z)) < 0.6 &&
           (lowerName.includes('ramp') || lowerName.includes('quarter') || lowerName.includes('bank') || lowerName.includes('kicker'))
         );
 
-        if (!looksRideableSlope && size.x > 0.3 && size.y > 0.3 && size.z > 0.3) {
+        if (!looksRideableSlope && size.x > 0.35 && size.y > 0.35 && size.z > 0.35) {
           colliders.push({
             name: obj.name || 'park object',
             x: center.x,
@@ -451,7 +502,57 @@ export default function CyberSkateGame() {
             h: box.max.y
           });
         }
-      });
+      }
+
+      if (!rails.length) addFallbackGrindZones(bounds);
+      return bounds;
+    }
+
+    function wouldHitParkWall(from, move, radius) {
+      if (!parkCollisionMeshes.length || move.lengthSq() < 0.0001) return false;
+      wallDir.copy(move).normalize();
+      const far = move.length() + radius + 0.18;
+      const heights = [0.55, 1.15, 2.0];
+      for (const h of heights) {
+        wallOrigin.set(from.x, state.y + h, from.z).addScaledVector(wallDir, -0.08);
+        wallRay.set(wallOrigin, wallDir);
+        wallRay.far = far;
+        const hits = wallRay.intersectObjects(parkCollisionMeshes, true);
+        for (const hit of hits) {
+          if (hit.distance > far) continue;
+          const n = hit.face?.normal ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+          if (n.y < WALKABLE_NORMAL_Y && hit.point.y > state.y + 0.18 && hit.point.y < state.y + 2.7) return true;
+        }
+      }
+      return false;
+    }
+
+    function findSpawnPoint(bounds) {
+      const size = bounds.getSize(new THREE.Vector3());
+      const center = bounds.getCenter(new THREE.Vector3());
+      const preferred = new THREE.Vector3(center.x, 0, center.z + size.z * SPAWN_Z_BIAS);
+      const candidates = [preferred];
+      for (let iz = -3; iz <= 2; iz++) {
+        for (let ix = -2; ix <= 2; ix++) {
+          candidates.push(new THREE.Vector3(
+            center.x + ix * size.x * 0.11,
+            0,
+            center.z + (SPAWN_Z_BIAS + iz * 0.09) * size.z
+          ));
+        }
+      }
+      let best = preferred;
+      let bestScore = -Infinity;
+      for (const c of candidates) {
+        const g = getGroundInfo(c.x, c.z, 4);
+        const flatness = g.normal.y;
+        const score = flatness * 10 - Math.abs(c.x - center.x) * 0.03 - Math.abs(c.z - preferred.z) * 0.02 + g.y * 0.02;
+        if (flatness > 0.55 && score > bestScore) {
+          bestScore = score;
+          best = new THREE.Vector3(c.x, g.y, c.z);
+        }
+      }
+      return best;
     }
 
     const loader = new GLTFLoader();
@@ -469,12 +570,26 @@ export default function CyberSkateGame() {
         park.position.set(0, 0, 0);
         park.rotation.y = 0;
         scene.add(park);
-        registerParkCollision(park);
+        const fittedParkBounds = fitParkToWorld(park);
+        const parkBounds = registerParkCollision(park);
+        const parkSize = parkBounds.getSize(new THREE.Vector3());
 
         const visual = new THREE.Group();
         const skaterScene = skaterGltf.scene;
-        normalizeObjectToGround(skaterScene, 2.95);
-        skaterScene.rotation.y = Math.PI;
+        normalizeObjectToGround(skaterScene, SKATER_HEIGHT);
+        skaterScene.rotation.y = SKATER_FACING_OFFSET;
+        skaterScene.traverse((obj) => {
+          if (!obj.isMesh) return;
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          mats.forEach((m) => {
+            if (!m) return;
+            if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+            if (m.emissive) m.emissiveIntensity = Math.max(m.emissiveIntensity || 0, 0.18);
+            m.needsUpdate = true;
+          });
+        });
         visual.add(skaterScene);
         visual.userData.boardGroup = skaterScene;
         visual.userData.skaterGroup = skaterScene;
@@ -482,16 +597,22 @@ export default function CyberSkateGame() {
 
         if (skaterGltf.animations?.length) {
           const mixer = new THREE.AnimationMixer(skaterScene);
-          const clip = skaterGltf.animations[0];
-          mixer.clipAction(clip).play();
+          const clip = skaterGltf.animations.find((c) => /skate|idle|walk|run|base/i.test(c.name)) || skaterGltf.animations[0];
+          const action = mixer.clipAction(clip);
+          action.enabled = true;
+          action.setEffectiveWeight(1);
+          action.play();
           animationMixers.push(mixer);
+          animationControls.mixer = mixer;
+          animationControls.action = action;
+          animationControls.clipName = clip.name;
         }
 
-        const parkBox = new THREE.Box3().setFromObject(park);
-        const parkCenter = parkBox.getCenter(new THREE.Vector3());
-        state.pos.set(parkCenter.x, 0, parkCenter.z - Math.min(12, parkBox.getSize(new THREE.Vector3()).z * 0.25));
+        const spawn = findSpawnPoint(parkBounds || fittedParkBounds);
+        state.pos.set(spawn.x, spawn.y, spawn.z);
+        state.y = spawn.y;
         state.yaw = 0;
-        state.trick = 'READY';
+        state.trick = `READY ${Math.round(parkSize.x)}x${Math.round(parkSize.z)}`;
         state.loaded = true;
       } catch (err) {
         console.error('GLB load failed, using fallback skater / park floor.', err);
@@ -535,14 +656,14 @@ export default function CyberSkateGame() {
 
     const getGroundInfo = (x, z, currentY) => {
       if (!parkCollisionMeshes.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
-      downOrigin.set(x, currentY + 12, z);
+      downOrigin.set(x, currentY + 80, z);
       downRay.set(downOrigin, downDir);
-      downRay.far = 40;
+      downRay.far = 140;
       const hits = downRay.intersectObjects(parkCollisionMeshes, true);
       if (!hits.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
       let best = null;
       for (const hit of hits) {
-        if (hit.point.y > currentY + 3.5) continue;
+        if (hit.point.y > currentY + 7.0) continue;
         if (!best || hit.point.y > best.point.y) best = hit;
       }
       if (!best) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
@@ -635,7 +756,7 @@ export default function CyberSkateGame() {
 
     let raf = 0;
     let last = performance.now();
-    const playerRadius = 0.52;
+    const playerRadius = PLAYER_RADIUS;
     const forward = new THREE.Vector3();
     const cameraTarget = new THREE.Vector3();
     const desiredCamera = new THREE.Vector3();
@@ -645,6 +766,11 @@ export default function CyberSkateGame() {
       const dt = Math.min(0.033, (now - last) / 1000 || 0.016);
       last = now;
       animationMixers.forEach((mixer) => mixer.update(dt));
+      if (animationControls.action) {
+        const moving = state.speed > 1.2 || !state.grounded;
+        animationControls.action.paused = !moving;
+        animationControls.action.timeScale = clamp(0.55 + state.speed / 9, 0.6, 2.4);
+      }
 
       const keyForward = input.keys.has('KeyW') || input.keys.has('ArrowUp');
       const keyBrake = input.keys.has('KeyS') || input.keys.has('ArrowDown');
@@ -684,11 +810,13 @@ export default function CyberSkateGame() {
       state.hitCooldown = Math.max(0, state.hitCooldown - dt);
 
       forward.set(Math.sin(state.yaw), 0, Math.cos(state.yaw));
-      const candidate = state.pos.clone().addScaledVector(forward, state.speed * dt);
+      const move = forward.clone().multiplyScalar(state.speed * dt);
+      const candidate = state.pos.clone().add(move);
       let hit = false;
       for (const b of colliders) hit = resolveBox(candidate, b, playerRadius) || hit;
+      hit = wouldHitParkWall(state.pos, move, playerRadius) || hit;
       if (hit) {
-        state.speed *= 0.32;
+        state.speed *= 0.28;
         state.combo = 1;
         state.trick = 'BONK';
         if (state.hitCooldown <= 0) {
@@ -696,7 +824,7 @@ export default function CyberSkateGame() {
           audio.current?.bonk();
         }
       }
-      state.pos.copy(candidate);
+      if (!hit) state.pos.copy(candidate);
 
       const groundInfo = getGroundInfo(state.pos.x, state.pos.z, state.y);
       const groundY = groundInfo.y;
@@ -753,10 +881,10 @@ export default function CyberSkateGame() {
         playerLean.rotation.x = lerp(playerLean.rotation.x, 0, 0.12);
       }
 
-      desiredCamera.copy(state.pos).addScaledVector(forward, -7.4).add(new THREE.Vector3(0, 3.8 + clamp(state.speed / 10, 0, 1.2), 0));
-      cameraTarget.lerp(desiredCamera, 1 - Math.pow(0.0005, dt));
+      desiredCamera.copy(state.pos).addScaledVector(forward, -6.8).add(new THREE.Vector3(0, 3.4 + clamp(state.speed / 10, 0, 1.0), 0));
+      cameraTarget.lerp(desiredCamera, 1 - Math.pow(0.00005, dt));
       camera.position.copy(cameraTarget);
-      lookTarget.copy(state.pos).addScaledVector(forward, 4.8).add(new THREE.Vector3(0, 1.35, 0));
+      lookTarget.copy(state.pos).addScaledVector(forward, 5.2).add(new THREE.Vector3(0, 1.45, 0));
       camera.lookAt(lookTarget);
 
       greenLight.position.set(state.pos.x - forward.x * 2.3, state.y + 3.2, state.pos.z - forward.z * 2.3);
@@ -826,7 +954,7 @@ export default function CyberSkateGame() {
         </div>
       </div>
       <div className="toast">
-        {stats.trick} · swipe up to push · swipe up-left/up-right to push and carve · swipe down to brake · fast swipe up to ollie
+        {stats.trick} · GLB skater + park · swipe up to push · swipe up-left/up-right to carve · swipe down to brake · fast swipe up to ollie
       </div>
       <div className="cornerNote">WASD / arrows · space ollie · F trick</div>
       <div className="scanlines" />
