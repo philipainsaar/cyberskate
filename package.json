@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": "22.x"
+    "node": ">=20 <23"
   },
   "scripts": {
     "dev": "next dev",
@@ -12,10 +12,9 @@
     "start": "next start"
   },
   "dependencies": {
-    "next": "16.2.9",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "three": "0.181.2"
-  },
-  "devDependencies": {}
+    "next": "14.2.35",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "three": "0.160.0"
+  }
 }
