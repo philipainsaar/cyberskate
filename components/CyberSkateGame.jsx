@@ -7,11 +7,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
-// Polish-pass tuning values based on the actual uploaded GLBs.
-// skate-park.glb is authored as a tiny diorama, so it must be enlarged for gameplay.
 const PARK_SCALE = 28;
 const SKATER_HEIGHT = 2.95;
 const SKATER_FACING_OFFSET = 0;
+const SKATEBOARD_LENGTH = 2.15;
+const SKATEBOARD_FACING_OFFSET = 0;
+const BOARD_RIDE_HEIGHT = 0.14;
+const BOARD_TRICK_SPIN_SPEED = 18;
+const BOARD_TRICK_FLIP_SPEED = 22;
 const SPAWN_Z_BIAS = -0.33;
 const WALKABLE_NORMAL_Y = 0.42;
 const PLAYER_RADIUS = 0.58;
@@ -91,15 +94,21 @@ function mat(color, roughness = 0.85, metalness = 0.05, emissive = null, map = n
   });
 }
 
-function createFallbackPlayer(materials) {
-  const root = new THREE.Group();
-  root.name = 'FallbackSkaterRoot';
-
+function createFallbackBoard(materials) {
   const boardGroup = new THREE.Group();
+  boardGroup.name = 'FallbackBoard';
+
   const deck = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.09, 2.15), materials.deck);
   deck.position.y = 0.12;
   deck.castShadow = true;
+  deck.receiveShadow = true;
   boardGroup.add(deck);
+
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.08, 0.25), materials.deck);
+  nose.position.set(0, 0.18, 1.08);
+  const tail = nose.clone();
+  tail.position.z = -1.08;
+  boardGroup.add(nose, tail);
 
   const axleGeo = new THREE.CylinderGeometry(0.035, 0.035, 1.0, 8);
   const wheelGeo = new THREE.CylinderGeometry(0.13, 0.13, 0.16, 10);
@@ -107,15 +116,26 @@ function createFallbackPlayer(materials) {
     const axle = new THREE.Mesh(axleGeo, materials.metal);
     axle.rotation.z = Math.PI / 2;
     axle.position.set(0, 0.02, z);
+    axle.castShadow = true;
     boardGroup.add(axle);
     [-0.55, 0.55].forEach((x) => {
       const wh = new THREE.Mesh(wheelGeo, materials.wheel);
       wh.rotation.z = Math.PI / 2;
       wh.position.set(x, -0.1, z);
       wh.castShadow = true;
+      wh.receiveShadow = true;
       boardGroup.add(wh);
     });
   });
+
+  return boardGroup;
+}
+
+function createFallbackPlayer(materials) {
+  const root = new THREE.Group();
+  root.name = 'FallbackSkaterRoot';
+
+  const boardGroup = createFallbackBoard(materials);
   root.add(boardGroup);
 
   const body = new THREE.Group();
@@ -242,8 +262,24 @@ function normalizeObjectToGround(object, targetHeight = 2.8) {
   object.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
   const scale = targetHeight / Math.max(size.y, 0.001);
+  object.scale.multiplyScalar(scale);
+  object.updateMatrixWorld(true);
+  const scaledBox = new THREE.Box3().setFromObject(object);
+  const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
+  object.position.x -= scaledCenter.x;
+  object.position.z -= scaledCenter.z;
+  object.position.y -= scaledBox.min.y;
+  object.updateMatrixWorld(true);
+  return object;
+}
+
+function normalizeBoardObject(object, targetLength = SKATEBOARD_LENGTH) {
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  const size = box.getSize(new THREE.Vector3());
+  const longest = Math.max(size.x, size.z, 0.001);
+  const scale = targetLength / longest;
   object.scale.multiplyScalar(scale);
   object.updateMatrixWorld(true);
   const scaledBox = new THREE.Box3().setFromObject(object);
@@ -378,6 +414,11 @@ export default function CyberSkateGame() {
       hitCooldown: 0,
       trickCooldown: 0,
       airtime: 0,
+      boardFlip: 0,
+      boardSpin: 0,
+      boardKick: 0,
+      boardTrickActive: false,
+      boardTrickType: 'none',
       loaded: false
     };
 
@@ -479,8 +520,6 @@ export default function CyberSkateGame() {
           continue;
         }
 
-        // If the park was exported as one merged mesh, a bounding box collider would block the whole map.
-        // Use triangle raycasts for the merged mesh instead, and keep only boundaries + helper rails.
         if (isMainMergedMesh) continue;
 
         const looksRideableSlope = (
@@ -527,6 +566,23 @@ export default function CyberSkateGame() {
       return false;
     }
 
+    const getGroundInfo = (x, z, currentY) => {
+      if (!parkCollisionMeshes.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
+      downOrigin.set(x, currentY + 80, z);
+      downRay.set(downOrigin, downDir);
+      downRay.far = 140;
+      const hits = downRay.intersectObjects(parkCollisionMeshes, true);
+      if (!hits.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
+      let best = null;
+      for (const hit of hits) {
+        if (hit.point.y > currentY + 7.0) continue;
+        if (!best || hit.point.y > best.point.y) best = hit;
+      }
+      if (!best) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
+      const worldNormal = best.face?.normal ? best.face.normal.clone().transformDirection(best.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+      return { y: best.point.y, normal: worldNormal };
+    };
+
     function findSpawnPoint(bounds) {
       const size = bounds.getSize(new THREE.Vector3());
       const center = bounds.getCenter(new THREE.Vector3());
@@ -560,9 +616,10 @@ export default function CyberSkateGame() {
 
     const loadAssets = async () => {
       try {
-        const [parkGltf, skaterGltf] = await Promise.all([
+        const [parkGltf, skaterGltf, skateboardResult] = await Promise.all([
           loadGLB(loader, '/models/skate-park.glb'),
-          loadGLB(loader, '/models/skater.glb')
+          loadGLB(loader, '/models/skater.glb'),
+          loadGLB(loader, '/models/skateboard.glb').then((gltf) => ({ ok: true, gltf })).catch(() => ({ ok: false, gltf: null }))
         ]);
         if (disposed) return;
 
@@ -575,9 +632,41 @@ export default function CyberSkateGame() {
         const parkSize = parkBounds.getSize(new THREE.Vector3());
 
         const visual = new THREE.Group();
+        visual.name = 'PlayerVisual';
+
+        const boardMount = new THREE.Group();
+        boardMount.name = 'BoardMount';
+        const skaterMount = new THREE.Group();
+        skaterMount.name = 'SkaterMount';
+        visual.add(boardMount);
+        visual.add(skaterMount);
+
+        let boardScene;
+        if (skateboardResult.ok && skateboardResult.gltf?.scene) {
+          boardScene = skateboardResult.gltf.scene;
+          normalizeBoardObject(boardScene, SKATEBOARD_LENGTH);
+          boardScene.rotation.y = SKATEBOARD_FACING_OFFSET;
+          boardScene.traverse((obj) => {
+            if (!obj.isMesh) return;
+            obj.castShadow = true;
+            obj.receiveShadow = true;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            mats.forEach((m) => {
+              if (!m) return;
+              if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+              m.needsUpdate = true;
+            });
+          });
+          boardMount.add(boardScene);
+        } else {
+          boardScene = createFallbackBoard(materials);
+          boardMount.add(boardScene);
+        }
+
         const skaterScene = skaterGltf.scene;
         normalizeObjectToGround(skaterScene, SKATER_HEIGHT);
         skaterScene.rotation.y = SKATER_FACING_OFFSET;
+        skaterScene.position.y = BOARD_RIDE_HEIGHT;
         skaterScene.traverse((obj) => {
           if (!obj.isMesh) return;
           obj.castShadow = true;
@@ -590,9 +679,10 @@ export default function CyberSkateGame() {
             m.needsUpdate = true;
           });
         });
-        visual.add(skaterScene);
-        visual.userData.boardGroup = skaterScene;
-        visual.userData.skaterGroup = skaterScene;
+        skaterMount.add(skaterScene);
+
+        visual.userData.boardGroup = boardMount;
+        visual.userData.skaterGroup = skaterMount;
         mountPlayerVisual(visual);
 
         if (skaterGltf.animations?.length) {
@@ -612,7 +702,7 @@ export default function CyberSkateGame() {
         state.pos.set(spawn.x, spawn.y, spawn.z);
         state.y = spawn.y;
         state.yaw = 0;
-        state.trick = `READY ${Math.round(parkSize.x)}x${Math.round(parkSize.z)}`;
+        state.trick = skateboardResult.ok ? `READY ${Math.round(parkSize.x)}x${Math.round(parkSize.z)}` : 'READY + FALLBACK BOARD';
         state.loaded = true;
       } catch (err) {
         console.error('GLB load failed, using fallback skater / park floor.', err);
@@ -654,23 +744,6 @@ export default function CyberSkateGame() {
       return true;
     };
 
-    const getGroundInfo = (x, z, currentY) => {
-      if (!parkCollisionMeshes.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
-      downOrigin.set(x, currentY + 80, z);
-      downRay.set(downOrigin, downDir);
-      downRay.far = 140;
-      const hits = downRay.intersectObjects(parkCollisionMeshes, true);
-      if (!hits.length) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
-      let best = null;
-      for (const hit of hits) {
-        if (hit.point.y > currentY + 7.0) continue;
-        if (!best || hit.point.y > best.point.y) best = hit;
-      }
-      if (!best) return { y: 0, normal: new THREE.Vector3(0, 1, 0) };
-      const worldNormal = best.face?.normal ? best.face.normal.clone().transformDirection(best.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
-      return { y: best.point.y, normal: worldNormal };
-    };
-
     const doJump = (force = 9.4) => {
       if (!state.grounded && state.grindTimer <= 0) return;
       state.vy = force;
@@ -679,7 +752,16 @@ export default function CyberSkateGame() {
       state.airtime = 0;
       input.jumpQueued = false;
       state.trick = 'OLLIE';
+      startBoardTrick('ollie');
       audio.current?.pop();
+    };
+
+    const startBoardTrick = (kind = 'kickflip') => {
+      state.boardTrickActive = true;
+      state.boardTrickType = kind;
+      state.boardFlip = 0;
+      state.boardSpin = 0;
+      state.boardKick = kind === 'heelflip' ? -0.25 : 0.25;
     };
 
     const doTrick = () => {
@@ -687,7 +769,17 @@ export default function CyberSkateGame() {
       state.trickCooldown = 0.25;
       state.score += Math.round(150 * state.combo);
       state.combo = Math.min(12, state.combo + 1);
-      state.trick = state.grounded ? 'MANUAL TAP' : 'AIR TWIST';
+
+      if (state.grounded) {
+        state.trick = 'MANUAL TAP';
+        startBoardTrick('manual');
+      } else {
+        const options = ['kickflip', 'heelflip', 'shove-it', 'varial'];
+        const kind = options[Math.floor(Math.random() * options.length)];
+        state.trick = kind.toUpperCase();
+        startBoardTrick(kind);
+      }
+
       audio.current?.trick();
     };
 
@@ -872,14 +964,70 @@ export default function CyberSkateGame() {
 
       playerRoot.position.set(state.pos.x, state.y, state.pos.z);
       playerRoot.rotation.y = state.yaw;
-      const tilt = clamp(steer, -1, 1) * clamp(state.speed / 12, 0, 1) * 0.22;
-      playerLean.rotation.z = lerp(playerLean.rotation.z, -tilt * 0.35, 0.14);
-      playerLean.position.y = state.grounded ? Math.sin(now * 0.016 * Math.max(state.speed, 1)) * 0.02 : 0.05;
-      if (!state.grounded) {
-        playerLean.rotation.x = lerp(playerLean.rotation.x, -0.08 + clamp(state.vy * 0.02, -0.2, 0.2), 0.08);
-      } else {
-        playerLean.rotation.x = lerp(playerLean.rotation.x, 0, 0.12);
+
+      if (currentVisual?.userData?.boardGroup && currentVisual?.userData?.skaterGroup) {
+        const boardGroup = currentVisual.userData.boardGroup;
+        const skaterGroup = currentVisual.userData.skaterGroup;
+        const tilt = clamp(steer, -1, 1) * clamp(state.speed / 12, 0, 1) * 0.22;
+        const rideBob = state.grounded ? Math.sin(now * 0.016 * Math.max(state.speed, 1)) * 0.02 : 0.05;
+
+        if (state.boardTrickActive) {
+          if (state.boardTrickType === 'kickflip') {
+            state.boardFlip += BOARD_TRICK_FLIP_SPEED * dt;
+            state.boardKick = lerp(state.boardKick, 0.18, 0.2);
+          } else if (state.boardTrickType === 'heelflip') {
+            state.boardFlip -= BOARD_TRICK_FLIP_SPEED * dt;
+            state.boardKick = lerp(state.boardKick, -0.18, 0.2);
+          } else if (state.boardTrickType === 'shove-it') {
+            state.boardSpin += BOARD_TRICK_SPIN_SPEED * dt;
+            state.boardKick = lerp(state.boardKick, 0, 0.2);
+          } else if (state.boardTrickType === 'varial') {
+            state.boardFlip += BOARD_TRICK_FLIP_SPEED * 0.82 * dt;
+            state.boardSpin += BOARD_TRICK_SPIN_SPEED * 0.78 * dt;
+            state.boardKick = lerp(state.boardKick, 0.15, 0.2);
+          } else if (state.boardTrickType === 'ollie') {
+            state.boardFlip = lerp(state.boardFlip, -0.35, 0.16);
+            state.boardSpin = lerp(state.boardSpin, 0, 0.2);
+            state.boardKick = lerp(state.boardKick, 0, 0.2);
+          } else if (state.boardTrickType === 'manual') {
+            state.boardFlip = lerp(state.boardFlip, -0.22, 0.18);
+            state.boardSpin = lerp(state.boardSpin, 0, 0.2);
+            state.boardKick = lerp(state.boardKick, 0, 0.2);
+          }
+
+          const flipDone = Math.abs(state.boardFlip) >= Math.PI * 2;
+          const spinDone = Math.abs(state.boardSpin) >= Math.PI * 2;
+          const simpleDone = (state.boardTrickType === 'ollie' || state.boardTrickType === 'manual') && state.grounded;
+          const airborneDone = state.grounded && state.airtime === 0 && state.boardTrickType !== 'manual';
+
+          if (flipDone || spinDone || simpleDone || airborneDone) {
+            state.boardTrickActive = false;
+            state.boardTrickType = 'none';
+          }
+        } else {
+          state.boardFlip = lerp(state.boardFlip, 0, 0.22);
+          state.boardSpin = lerp(state.boardSpin, 0, 0.22);
+          state.boardKick = lerp(state.boardKick, 0, 0.2);
+        }
+
+        boardGroup.rotation.x = -state.boardFlip;
+        boardGroup.rotation.y = state.boardSpin;
+        boardGroup.rotation.z = lerp(boardGroup.rotation.z, tilt + state.boardKick, 0.16);
+
+        skaterGroup.rotation.z = lerp(skaterGroup.rotation.z, -tilt * 0.28, 0.12);
+        skaterGroup.position.y = lerp(skaterGroup.position.y, BOARD_RIDE_HEIGHT + rideBob, 0.2);
+
+        if (!state.grounded) {
+          skaterGroup.rotation.x = lerp(skaterGroup.rotation.x, -0.06, 0.08);
+          skaterGroup.position.y = lerp(skaterGroup.position.y, BOARD_RIDE_HEIGHT + 0.18, 0.08);
+        } else {
+          skaterGroup.rotation.x = lerp(skaterGroup.rotation.x, 0, 0.12);
+        }
       }
+
+      playerLean.rotation.z = lerp(playerLean.rotation.z, 0, 0.14);
+      playerLean.position.y = 0;
+      playerLean.rotation.x = lerp(playerLean.rotation.x, 0, 0.12);
 
       desiredCamera.copy(state.pos).addScaledVector(forward, -6.8).add(new THREE.Vector3(0, 3.4 + clamp(state.speed / 10, 0, 1.0), 0));
       cameraTarget.lerp(desiredCamera, 1 - Math.pow(0.00005, dt));
@@ -954,7 +1102,7 @@ export default function CyberSkateGame() {
         </div>
       </div>
       <div className="toast">
-        {stats.trick} · GLB skater + park · swipe up to push · swipe up-left/up-right to carve · swipe down to brake · fast swipe up to ollie
+        {stats.trick} · separate skater.glb + skateboard.glb trick flips + park.glb · swipe up to push · swipe up-left/up-right to carve · swipe down to brake · fast swipe up to ollie
       </div>
       <div className="cornerNote">WASD / arrows · space ollie · F trick</div>
       <div className="scanlines" />
