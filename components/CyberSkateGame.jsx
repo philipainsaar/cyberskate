@@ -11,7 +11,7 @@ const lerp = (a, b, t) => a + (b - a) * t;
 // skate-park.glb is authored as a tiny diorama, so it must be enlarged for gameplay.
 const PARK_SCALE = 28;
 const SKATER_HEIGHT = 2.95;
-const SKATER_FACING_OFFSET = Math.PI;
+const SKATER_FACING_OFFSET = 0;
 const SPAWN_Z_BIAS = -0.33;
 const WALKABLE_NORMAL_Y = 0.42;
 const PLAYER_RADIUS = 0.58;
@@ -954,9 +954,9 @@ export default function CyberSkateGame() {
         </div>
       </div>
       <div className="toast">
-        {stats.trick}
+        {stats.trick} · GLB skater + park · swipe up to push · swipe up-left/up-right to carve · swipe down to brake · fast swipe up to ollie
       </div>
-      <div className="cornerNote"></div>
+      <div className="cornerNote">WASD / arrows · space ollie · F trick</div>
       <div className="scanlines" />
     </main>
   );
