@@ -954,9 +954,9 @@ export default function CyberSkateGame() {
         </div>
       </div>
       <div className="toast">
-        {stats.trick} · GLB skater + park · swipe up to push · swipe up-left/up-right to carve · swipe down to brake · fast swipe up to ollie
+        {stats.trick}
       </div>
-      <div className="cornerNote">WASD / arrows · space ollie · F trick</div>
+      <div className="cornerNote"></div>
       <div className="scanlines" />
     </main>
   );
